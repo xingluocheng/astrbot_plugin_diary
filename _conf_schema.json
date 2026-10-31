@@ -1,0 +1,122 @@
+{
+  "enabled": {
+    "description": "总开关",
+    "type": "bool",
+    "default": true,
+    "hint": "关掉后不再自动写日记，也不会注入上下文；指令仍然可用。"
+  },
+  "interval_hours": {
+    "description": "每隔多少小时检查一次",
+    "type": "int",
+    "default": 24,
+    "hint": "到点且攒够了消息才会写。想更勤快就调到 12，想一周一篇就调到 168。"
+  },
+  "min_messages": {
+    "description": "最少攒多少条消息才写",
+    "type": "int",
+    "default": 30,
+    "hint": "启动补写和定时补写都看这个门槛。太少没内容可写、也费 token；30 条左右比较省。"
+  },
+  "max_messages_per_diary": {
+    "description": "每篇日记最多参考多少条对话",
+    "type": "int",
+    "default": 120,
+    "hint": "太长会超模型上下文，也贵。超出的部分只取最近的。"
+  },
+  "inject_enabled": {
+    "description": "把日记注入上下文",
+    "type": "bool",
+    "default": true,
+    "hint": "开着，她聊天时才能真的想起来。关掉就只是单纯记录。"
+  },
+  "inject_recent": {
+    "description": "注入最近几篇",
+    "type": "int",
+    "default": 2,
+    "hint": "篇数越多记得越久，但每轮对话都多花 token。"
+  },
+  "inject_max_chars": {
+    "description": "注入内容字数上限",
+    "type": "int",
+    "default": 1500,
+    "hint": "超过就截断。控制成本用，1200~2000 之间比较合适。"
+  },
+  "owner_ids": {
+    "description": "主人 QQ 号",
+    "type": "string",
+    "default": "",
+    "hint": "只记录这个号说的话。多个用英文逗号分隔；留空则只认 AstrBot 管理员。"
+  },
+  "private_only": {
+    "description": "只记私聊",
+    "type": "bool",
+    "default": true,
+    "hint": "开着就只记私聊里的对话，群聊一概不记。"
+  },
+  "include_intimate": {
+    "description": "亲密的人也可以进日记",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，和她在「亲密度」插件里聊够天数的人说话也会被记下来，日记里能写到朋友。"
+  },
+  "intimate_days": {
+    "description": "多少天算亲密",
+    "type": "int",
+    "default": 14,
+    "hint": "要和亲密度插件的「亲密门槛」一致，否则两边的判断会对不上。"
+  },
+  "intimacy_data": {
+    "description": "亲密度数据文件",
+    "type": "string",
+    "default": "",
+    "hint": "留空自动读同级目录下的 astrbot_plugin_intimacy/users.json；改过位置就填绝对路径。"
+  },
+  "startup_write": {
+    "description": "启动时补写一篇",
+    "type": "bool",
+    "default": true,
+    "hint": "AstrBot 每次启动后，自动用最近的消息写一篇，不用等间隔时间。"
+  },
+  "startup_messages": {
+    "description": "启动补写取多少条",
+    "type": "int",
+    "default": 40,
+    "hint": "只取最近这么多条未写过的对话。"
+  },
+  "retention_days": {
+    "description": "日记保留天数",
+    "type": "int",
+    "default": 0,
+    "hint": "0 = 永久保留。设成 90 就只留最近 90 天，更早的自动归档到 archive/。"
+  },
+  "persona_extra": {
+    "description": "额外写作要求",
+    "type": "text",
+    "default": "",
+    "hint": "追加到写作提示词里，比如「多写吃的」「少写感受多写细节」「用短句」。"
+  },
+  "diary_voice": {
+    "description": "日记口吻",
+    "type": "string",
+    "default": "第一人称，像睡前随手写在备忘录里",
+    "hint": "可以改成「像在跟人讲故事」「像老派手账」「尽量克制，只写事实」等。"
+  },
+  "ignore_commands": {
+    "description": "过滤指令消息",
+    "type": "bool",
+    "default": true,
+    "hint": "开着，像 reset / help / 亲密度 / 空间帮助 这类指令不会进日记素材，免得拿指令凑字数。"
+  },
+  "ignore_command_words": {
+    "description": "额外要过滤的指令词",
+    "type": "string",
+    "default": "",
+    "hint": "英文逗号分隔。装了别的插件、有新的指令词要排除时填这里。"
+  },
+  "record_self": {
+    "description": "把她自己的回复也记下来",
+    "type": "bool",
+    "default": true,
+    "hint": "开着，日记里才会有「本鲸自己说过什么」，不只是别人说了什么。"
+  }
+}
