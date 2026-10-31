@@ -71,6 +71,7 @@ DEFAULTS = {
     "inject_recent": 2,
     "inject_max_chars": 1500,
     "owner_ids": "",
+    "bot_ids": "",
     "private_only": True,
     "include_intimate": True,
     "intimate_days": 14,
@@ -175,6 +176,16 @@ class DiaryStar(Star):
         except Exception:
             is_private = False
         if bool(self._cfg("private_only", True)) and not is_private:
+            return False
+
+        # 大肥鱼自己发的消息不进缓冲（她的话由 on_decorating_result 记，避免重复）
+        sender = str(event.get_sender_id() or "")
+        bots = {w.strip() for w in str(self._cfg("bot_ids", "") or "").replace("，", ",").split(",") if w.strip()}
+        try:
+            self_id = str(event.get_self_id() or "")
+        except Exception:
+            self_id = ""
+        if sender and (sender in bots or (self_id and sender == self_id)):
             return False
 
         if self._is_owner(event):
