@@ -93,6 +93,16 @@ COMMAND_WORDS = {
 }
 COMMAND_PREFIXES = ("空间", "日记", "亲密度")
 
+# 这些是报错提示，不是她说过的话，不能进日记素材
+ERROR_MARKERS = (
+    "LLM 响应错误",
+    "All chat models failed",
+    "APIStatusError",
+    "Insufficient Balance",
+    "请求失败",
+    "模型调用失败",
+)
+
 CHECK_INTERVAL = 300  # 后台每 5 分钟看一次是否该写
 
 
@@ -387,6 +397,10 @@ class DiaryStar(Star):
                         parts.append(piece)
             text = "\n".join(parts).strip()
             if not text:
+                return
+            # 报错提示不是她说过的话
+            if any(marker in text for marker in ERROR_MARKERS):
+                logger.debug("[diary] 跳过报错提示，不记进素材")
                 return
 
             umo = getattr(event, "unified_msg_origin", None) or event.get_session_id()
