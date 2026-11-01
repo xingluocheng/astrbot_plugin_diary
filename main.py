@@ -87,11 +87,11 @@ DEFAULTS = {
 
 # 这些是机器人指令，不该进日记素材
 COMMAND_WORDS = {
-    "reset", "help", "anysearch", "亲密度", "帮助",
+    "reset", "help", "anysearch", "亲密度", "好感度", "帮助",
     "空间", "空间帮助", "空间状态", "空间测试", "空间发",
     "日记", "日记帮助", "日记列表", "日记状态", "日记写",
 }
-COMMAND_PREFIXES = ("空间", "日记", "亲密度")
+COMMAND_PREFIXES = ("空间", "日记", "亲密度", "好感度")
 
 # 这些是报错提示，不是她说过的话，不能进日记素材
 ERROR_MARKERS = (
