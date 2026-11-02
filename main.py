@@ -83,6 +83,7 @@ DEFAULTS = {
     "diary_voice": "第一人称，像睡前随手写在备忘录里",
     "ignore_commands": True,
     "record_self": True,
+    "owner_folder": "与主人的美好记忆",
 }
 
 # 这些是机器人指令，不该进日记素材
@@ -114,7 +115,9 @@ class DiaryStar(Star):
         self.plugin_data_dir = data_dir.parent
         self.diary_root = ensure_diary_folder()
         logger.info(f"[diary] 日记目录：{self.diary_root}")
-        self.store = DiaryStore(data_dir, self.diary_root)
+        self.store = DiaryStore(
+            data_dir, self.diary_root, owner_folder=str(self._cfg("owner_folder", "") or "")
+        )
         self._lock = asyncio.Lock()
         self._loop_task: asyncio.Task | None = None
         self._startup_task: asyncio.Task | None = None
@@ -255,30 +258,66 @@ class DiaryStar(Star):
                     pass
 
     async def _startup_write(self) -> None:
-        """AstrBot 启动后，用最近 N 条补写一篇。"""
+        """AstrBot 启动后，给攒够的人各补写一篇。"""
         await asyncio.sleep(15)  # 等模型/平台适配器加载完
         if not bool(self._cfg("startup_write", True)):
             return
         limit = int(self._cfg("startup_messages", 40) or 40)
         for attempt in range(3):
-            try:
-                pending = self.store.pending_chats(limit)
-            except Exception as exc:
-                logger.debug(f"[diary] 启动读取缓冲失败：{exc}")
-                return
-            need = int(self._cfg("min_messages", 30) or 30)
-            if len(pending) < need:
-                logger.info(f"[diary] 启动检查：只有 {len(pending)} 条新对话（门槛 {need}），先不写")
-                return
             result = await self.maybe_write(force=True, limit=limit)
             if result.get("ok"):
                 logger.info(f"[diary] 启动补写完成：{result.get('detail')}")
                 return
             logger.debug(f"[diary] 启动补写第 {attempt + 1} 次未成：{result.get('detail')}")
+            if result.get("detail") in ("没有攒够的人", "没有新的对话"):
+                logger.info(f"[diary] 启动检查：{result.get('detail')}")
+                return
             await asyncio.sleep(20)
         logger.info("[diary] 启动补写放弃，等后台定时再写")
 
     # ------------------------------------------------------------- 写日记
+    def _intimacy_record(self, uid: str) -> dict:
+        """取亲密度插件里这个人的记录。"""
+        try:
+            path = self._intimacy_file()
+            mtime = path.stat().st_mtime
+        except Exception:
+            return {}
+        cached_mtime, cached = self._intimacy_cache
+        if mtime != cached_mtime:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                cached = data if isinstance(data, dict) else {}
+            except Exception:
+                cached = {}
+            self._intimacy_cache = (mtime, cached)
+        return cached.get(str(uid)) or {}
+
+    def _person_name(self, uid: str, rows: list[dict]) -> str:
+        """这个人的显示名：优先亲密度插件里的昵称，其次聊天缓冲里的 who。"""
+        rec = self._intimacy_record(uid)
+        name = str(rec.get("name") or "").strip()
+        if name and name != str(uid):
+            return name
+        for row in reversed(rows):
+            who = str(row.get("who") or "").strip()
+            if who and who not in ("大肥鱼", "主人", "某人", str(uid)):
+                return who
+        return f"QQ尾号{str(uid)[-4:]}" if uid else "未命名"
+
+    def _can_write_for(self, uid: str) -> bool:
+        """主人永远可以；其他人要亲密度够。"""
+        if uid in self._owner_ids():
+            return True
+        if not bool(self._cfg("include_intimate", True)):
+            return False
+        need = int(self._cfg("intimate_days", 14) or 14)
+        return self._intimate_days(uid) >= need
+
+    def _owner_ids(self) -> set[str]:
+        raw = str(self._cfg("owner_ids", "") or "")
+        return {w.strip() for w in raw.replace("，", ",").split(",") if w.strip()}
+
     async def maybe_write(self, force: bool = False, limit: int | None = None) -> dict:
         if not bool(self._cfg("enabled", True)):
             return {"ok": False, "detail": "总开关关着"}
@@ -290,17 +329,31 @@ class DiaryStar(Star):
         if not force and last and (time.time() - last) < interval:
             return {"ok": False, "detail": "还没到时间"}
 
-        total = self.store.chat_line_count()
         limit = int(limit or self._cfg("max_messages_per_diary", 120) or 120)
-        pending = self.store.pending_chats(limit)
-        if not pending:
+        need = int(self._cfg("min_messages", 30) or 30)
+        groups = self.store.pending_by_person(limit)
+        if not groups:
             return {"ok": False, "detail": "没有新的对话"}
-        if not force and len(pending) < int(self._cfg("min_messages", 30) or 30):
-            return {"ok": False, "detail": f"只攒了 {len(pending)} 条，不够"}
 
-        # 同一批素材不写第二遍：防止重启、热重载、双实例等情况下重复写
-        fp = self.store.fingerprint(pending)
-        if fp and fp == str(self.store.get("last_diary_fingerprint") or ""):
+        # 挑一个够条件的：攒够条数、而且这人够格（主人或亲密度到位）
+        candidates = []
+        for uid, rows in groups.items():
+            if len(rows) < need:
+                continue
+            if not self._can_write_for(uid):
+                continue
+            candidates.append((float(rows[0].get("ts") or 0), uid, rows))
+        if not candidates:
+            return {"ok": False, "detail": "没有攒够的人"}
+        candidates.sort()
+        _, uid, rows = candidates[0]
+
+        name = self._person_name(uid, rows)
+        is_owner = uid in self._owner_ids()
+        folder = self.store.folder_for(uid, name, is_owner)
+
+        fp = self.store.fingerprint(rows)
+        if fp and fp == self.store.fingerprint_of(uid):
             return {"ok": False, "detail": "这批内容已经写过了，跳过"}
 
         provider = self._provider()
@@ -308,24 +361,25 @@ class DiaryStar(Star):
             return {"ok": False, "detail": "没有可用模型"}
 
         async with self._lock:
-            start = pending[0].get("ts") or time.time()
-            end = pending[-1].get("ts") or time.time()
+            start = rows[0].get("ts") or time.time()
+            end = rows[-1].get("ts") or time.time()
             fmt = "%m-%d %H:%M"
             time_range = (
                 f"{datetime.fromtimestamp(start).strftime(fmt)} ~ "
                 f"{datetime.fromtimestamp(end).strftime(fmt)}"
             )
             transcript = "\n".join(
-                f"{row.get('who', '某人')}：{row.get('text', '')}" for row in pending
+                f"{row.get('who', '某人')}：{row.get('text', '')}" for row in rows
             )
             try:
                 data = await writer.write_diary(
                     provider,
                     transcript=transcript,
                     time_range=time_range,
-                    message_count=len(pending),
+                    message_count=len(rows),
                     voice=str(self._cfg("diary_voice", "") or ""),
                     extra=str(self._cfg("persona_extra", "") or ""),
+                    companion=("主人" if is_owner else name),
                 )
             except Exception as exc:
                 logger.warning(f"[diary] 写作失败：{exc}")
@@ -337,23 +391,24 @@ class DiaryStar(Star):
             meta = {
                 "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "range": time_range,
-                "messages": len(pending),
+                "messages": len(rows),
                 "mood": data.get("mood", ""),
                 "title": data.get("title", ""),
                 "tags": data.get("tags", []),
+                "with": "主人" if is_owner else name,
             }
-            path = self.store.save_diary(meta, data["body"])
-            # 只把「实际用到的最后一条」标成已写，中途新来的消息留到下一篇
-            self.store.mark_consumed(total, last_ts=end)
-            self.store.set("last_diary_fingerprint", fp)
+            path = self.store.save_diary(meta, data["body"], folder)
+            # 只记这个人写到哪了，互不影响
+            self.store.mark_consumed(uid, last_ts=end, fingerprint=fp)
             moved = self.store.apply_retention(int(self._cfg("retention_days", 0) or 0))
             if moved:
                 logger.info(f"[diary] 归档了 {moved} 篇旧日记")
-            logger.info(f"[diary] 写完一篇：{path.name}")
+            logger.info(f"[diary] 写完一篇：{folder}/{path.name}")
             return {
                 "ok": True,
                 "path": str(path),
-                "detail": f"写完啦（{len(pending)} 条对话 → {len(data['body'])} 字）",
+                "folder": folder,
+                "detail": f"写完啦（{folder} · {len(rows)} 条 → {len(data['body'])} 字）",
             }
 
     # ------------------------------------------------------------- 事件
@@ -363,11 +418,12 @@ class DiaryStar(Star):
             text = (getattr(event, "message_str", "") or "").strip()
             if text and not self._is_command_noise(text) and self._should_record(event):
                 umo = getattr(event, "unified_msg_origin", None) or event.get_session_id()
+                uid = str(event.get_sender_id() or "")
                 if self._is_owner(event):
                     who = "主人"
                 else:
-                    who = event.get_sender_name() or str(event.get_sender_id() or "某人")
-                self.store.append_chat(umo, who, text)
+                    who = event.get_sender_name() or f"QQ尾号{uid[-4:]}"
+                self.store.append_chat(umo, uid, who, text)
             self._ensure_loop()
         except Exception as exc:
             logger.debug(f"[diary] 记录消息失败：{exc}")
@@ -404,7 +460,9 @@ class DiaryStar(Star):
                 return
 
             umo = getattr(event, "unified_msg_origin", None) or event.get_session_id()
-            self.store.append_chat(umo, "大肥鱼", text)
+            # 她的回复算在「正在和她聊的这个人」名下
+            owner_uid = str(event.get_sender_id() or "")
+            self.store.append_chat(umo, owner_uid, "大肥鱼", text)
         except Exception as exc:
             logger.debug(f"[diary] 记录自己的回复失败：{exc}")
 
@@ -413,13 +471,33 @@ class DiaryStar(Star):
         try:
             if not bool(self._cfg("inject_enabled", True)):
                 return
+            uid = str(event.get_sender_id() or "")
+            is_owner = self._is_owner(event)
+
+            # 只读「和当前这个人」的日记：主人读主人文件夹，其他人读自己的文件夹
+            folder = self.store.folder_of(uid)
+            if not folder:
+                if is_owner:
+                    folder = self.store.owner_folder
+                elif self._can_write_for(uid):
+                    folder = self.store.folder_for(uid, self._person_name(uid, []), False)
+                else:
+                    return  # 还没到亲密，没给她写过日记，也就没得读
+            if is_owner:
+                folder = self.store.owner_folder
+
             count = int(self._cfg("inject_recent", 2) or 2)
-            items = self.store.recent(count)
+            items = self.store.recent(count, folder)
             if not items:
                 return
             limit = int(self._cfg("inject_max_chars", 1500) or 1500)
+            header = (
+                "【本鲸的日记】"
+                if is_owner
+                else f"【本鲸关于「{folder}」的日记】"
+            )
             chunks = [
-                "【本鲸的日记】",
+                header,
                 "下面是本鲸自己写的日记，用来想起之前发生过什么。",
                 "- 聊到以前的事，优先从这里找；找不到就直说记不清了。",
                 "- 用你自己的话说，别逐字念，也别说“根据我的日记”。",
