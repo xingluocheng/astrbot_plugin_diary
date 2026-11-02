@@ -160,6 +160,27 @@ class DiaryStore:
     def chat_line_count(self) -> int:
         return len(self._read_all_chats())
 
+    def drop_recent(self, uid: str, since_ts: float) -> int:
+        """把这人的最近几条从缓冲里撤掉（用于「这轮本来就不该记」）。"""
+        uid = str(uid or "")
+        with self._lock:
+            rows = self._read_all_chats()
+            keep = [
+                r for r in rows
+                if not (
+                    self._row_uid(r) == uid
+                    and float(r.get("ts") or 0) >= float(since_ts or 0)
+                )
+            ]
+            dropped = len(rows) - len(keep)
+            if dropped:
+                tmp = self.chat_path.with_suffix(".tmp")
+                with tmp.open("w", encoding="utf-8", newline="\n") as fh:
+                    for r in keep:
+                        fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+                tmp.replace(self.chat_path)
+            return dropped
+
     @staticmethod
     def _row_uid(row: dict) -> str:
         """老数据没有 uid，从 umo 里猜：FriendMessage:12345 → 12345。"""
