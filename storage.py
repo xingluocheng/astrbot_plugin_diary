@@ -1,34 +1,62 @@
-"""日记存储：聊天缓冲、日记文件、索引与状态。"""
+"""日记存储：按人分文件夹、聊天缓冲、索引与状态。
+
+目录结构（桌面）：
+    大肥鱼日记（不要删除）/
+    ├── 与主人的美好记忆/        ← 主人的日记
+    │   ├── 20261102-0013.md
+    │   └── index.md
+    ├── 小晴/                    ← 亲密朋友的日记，用昵称当文件夹名
+    │   └── ...
+    └── index.md                 ← 总索引（谁有几个文件夹）
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 from pathlib import Path
 
 DEFAULT_STATE = {
     "last_write_ts": 0.0,
-    "consumed_lines": 0,
-    "last_msg_ts": 0.0,          # 上次写进日记的最新消息时间；重启后靠它去重
-    "last_diary_fingerprint": "",  # 上一批素材的指纹，防止同一批写两遍
     "diary_count": 0,
+    # 按人记进度：{uid: 上次写进日记的最新消息时间}
+    "consumed": {},
+    # 按人记指纹：{uid: 上一批素材指纹}
+    "fingerprints": {},
+    # 按人记文件夹名：{uid: "小晴"}
+    "folders": {},
+    # 旧版本字段，保留兼容
+    "consumed_lines": 0,
+    "last_msg_ts": 0.0,
+    "last_diary_fingerprint": "",
 }
 
 SEP = "---"
+OWNER_FOLDER = "与主人的美好记忆"
+_ILLEGAL = re.compile(r'[\\/:*?"<>|\r\n\t]')
+
+
+def safe_folder_name(name: str, fallback: str = "未命名") -> str:
+    """文件夹名不能带路径符号，也不能太长。"""
+    n = _ILLEGAL.sub("", str(name or "")).strip().strip(".")
+    n = re.sub(r"\s+", " ", n)
+    if not n:
+        n = fallback
+    return n[:40]
 
 
 class DiaryStore:
-    def __init__(self, data_dir: Path, diary_root: Path) -> None:
+    def __init__(self, data_dir: Path, diary_root: Path, owner_folder: str = OWNER_FOLDER) -> None:
         self.dir = Path(data_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
-        # 日记本体放在桌面的「大肥鱼日记（不要删除）」里，方便主人直接打开看。
         self.diary_dir = Path(diary_root)
         self.diary_dir.mkdir(parents=True, exist_ok=True)
+        self.owner_folder = safe_folder_name(owner_folder or OWNER_FOLDER, OWNER_FOLDER)
         self.archive_dir = self.dir / "archive"
         self.chat_path = self.dir / "chats.jsonl"
-        self.index_path = self.diary_dir / "index.md"
         self.state_path = self.dir / "state.json"
         self._lock = threading.Lock()
         self.state = self._load_state()
@@ -36,12 +64,18 @@ class DiaryStore:
     # ---------------------------------------------------------------- 状态
     def _load_state(self) -> dict:
         data = dict(DEFAULT_STATE)
+        data["consumed"] = {}
+        data["fingerprints"] = {}
+        data["folders"] = {}
         try:
             raw = json.loads(self.state_path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 data.update(raw)
         except Exception:
             pass
+        for key in ("consumed", "fingerprints", "folders"):
+            if not isinstance(data.get(key), dict):
+                data[key] = {}
         return data
 
     def save(self) -> None:
@@ -62,14 +96,39 @@ class DiaryStore:
         self.state[key] = value
         self.save()
 
+    # ------------------------------------------------------------ 文件夹
+    def folder_for(self, uid: str, name: str, is_owner: bool) -> str:
+        """这个人的日记放哪个文件夹。主人固定，其他人用昵称。"""
+        uid = str(uid or "")
+        if is_owner:
+            folder = self.owner_folder
+        else:
+            folder = safe_folder_name(name, f"QQ尾号{uid[-4:]}" if uid else "未命名")
+        if uid:
+            self.state["folders"][uid] = folder
+        return folder
+
+    def folder_of(self, uid: str) -> str:
+        """已知这个人的文件夹；没记过就返回空。"""
+        return str(self.state["folders"].get(str(uid or "")) or "")
+
+    def list_folders(self) -> list[tuple[str, int]]:
+        out = []
+        for d in sorted(self.diary_dir.iterdir()):
+            if d.is_dir():
+                n = len([p for p in d.glob("*.md") if p.name != "index.md"])
+                out.append((d.name, n))
+        return out
+
     # ---------------------------------------------------------------- 聊天
-    def append_chat(self, umo: str, who: str, text: str) -> None:
+    def append_chat(self, umo: str, uid: str, who: str, text: str) -> None:
         text = (text or "").strip()
         if not text:
             return
         row = {
             "ts": round(time.time(), 3),
             "umo": umo,
+            "uid": str(uid or ""),
             "who": who or "某人",
             "text": text[:600],
         }
@@ -101,24 +160,41 @@ class DiaryStore:
     def chat_line_count(self) -> int:
         return len(self._read_all_chats())
 
-    def pending_chats(self, limit: int) -> list[dict]:
-        """返回还没被写进日记的对话，最多 limit 条。
+    @staticmethod
+    def _row_uid(row: dict) -> str:
+        """老数据没有 uid，从 umo 里猜：FriendMessage:12345 → 12345。"""
+        uid = str(row.get("uid") or "")
+        if uid:
+            return uid
+        umo = str(row.get("umo") or "")
+        tail = umo.rsplit(":", 1)[-1]
+        if tail.isdigit() and "Friend" in umo:
+            return tail
+        return umo or "unknown"
 
-        以「上次写进日记的最新消息时间」为界，而不是按行号。
-        行号会被外部清空缓冲、文件重写搞乱；时间戳不会。
+    def pending_by_person(self, limit: int) -> dict[str, list[dict]]:
+        """按人分组，返回每人还没写进日记的对话。
+
+        用「这个人上次写进日记的时间」作界，互不干扰。
         """
-        rows = self._read_all_chats()
-        floor = float(self.state.get("last_msg_ts") or 0)
-        if floor:
-            fresh = [r for r in rows if float(r.get("ts") or 0) > floor]
-        else:
-            start = int(self.state.get("consumed_lines") or 0)
-            fresh = rows[start:] if start < len(rows) else []
-        return fresh[-max(1, limit):] if limit else fresh
+        consumed = self.state.get("consumed") or {}
+        floor_all = float(self.state.get("last_msg_ts") or 0)
+        groups: dict[str, list[dict]] = {}
+        for row in self._read_all_chats():
+            uid = self._row_uid(row)
+            floor = float(consumed.get(uid) or 0)
+            if not floor and not consumed:
+                floor = floor_all  # 老数据迁移：整体游标兜底
+            if float(row.get("ts") or 0) <= floor:
+                continue
+            groups.setdefault(uid, []).append(row)
+        if limit:
+            for uid in groups:
+                groups[uid] = groups[uid][-max(1, int(limit)):]
+        return groups
 
     @staticmethod
     def fingerprint(rows: list[dict]) -> str:
-        """给一批素材算指纹，用来判断是不是同一批。"""
         if not rows:
             return ""
         h = hashlib.sha1()
@@ -126,24 +202,34 @@ class DiaryStore:
             h.update(f"{row.get('ts')}|{row.get('who')}|{row.get('text')}".encode("utf-8"))
         return h.hexdigest()
 
-    def mark_consumed(self, total: int, last_ts: float = 0.0) -> None:
-        """记下已经写进日记的位置。
+    def fingerprint_of(self, uid: str) -> str:
+        return str((self.state.get("fingerprints") or {}).get(str(uid)) or "")
 
-        last_ts 用「实际用到的最新一条消息」的时间，
-        这样即使中途有新消息进来，也不会被误标成已写。
-        """
-        self.state["consumed_lines"] = int(total)
+    def mark_consumed(self, uid: str, last_ts: float = 0.0, fingerprint: str = "") -> None:
+        """记住「这个人的日记写到哪了」。"""
+        uid = str(uid or "")
+        if not uid:
+            return
+        consumed = self.state.setdefault("consumed", {})
         if last_ts:
-            self.state["last_msg_ts"] = max(
-                float(self.state.get("last_msg_ts") or 0), float(last_ts)
-            )
+            consumed[uid] = max(float(consumed.get(uid) or 0), float(last_ts))
+        if fingerprint:
+            self.state.setdefault("fingerprints", {})[uid] = fingerprint
+        self.state["last_msg_ts"] = max(
+            float(self.state.get("last_msg_ts") or 0), float(last_ts or 0)
+        )
         self.save()
 
     # ---------------------------------------------------------------- 日记
-    def save_diary(self, meta: dict, body: str) -> Path:
-        now = time.localtime()
-        stamp = time.strftime("%Y%m%d-%H%M", now)
-        path = self.diary_dir / f"{stamp}.md"
+    def save_diary(self, meta: dict, body: str, folder: str) -> Path:
+        target = self.diary_dir / safe_folder_name(folder, self.owner_folder)
+        target.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M", time.localtime())
+        path = target / f"{stamp}.md"
+        n = 1
+        while path.exists():
+            n += 1
+            path = target / f"{stamp}-{n}.md"
         head = [
             SEP,
             f"date: {meta.get('date', '')}",
@@ -152,6 +238,7 @@ class DiaryStore:
             f"mood: {meta.get('mood', '')}",
             f"title: {meta.get('title', '')}",
             f"tags: {', '.join(meta.get('tags') or [])}",
+            f"with: {meta.get('with', '')}",
             SEP,
             "",
             f"# {meta.get('title') or '这一天'}",
@@ -163,7 +250,8 @@ class DiaryStore:
         self.state["last_write_ts"] = time.time()
         self.state["diary_count"] = int(self.state.get("diary_count") or 0) + 1
         self.save()
-        self.rebuild_index()
+        self.rebuild_index(target)
+        self.rebuild_master_index()
         return path
 
     @staticmethod
@@ -172,7 +260,7 @@ class DiaryStore:
             raw = path.read_text(encoding="utf-8")
         except Exception:
             return {}
-        meta: dict = {"path": str(path), "name": path.name}
+        meta: dict = {"path": str(path), "name": path.name, "folder": path.parent.name}
         body = raw
         lines = raw.splitlines()
         if lines and lines[0].strip() == SEP:
@@ -190,20 +278,33 @@ class DiaryStore:
         ]
         return meta
 
-    def list_diaries(self) -> list[dict]:
-        # index.md 也在这个目录里，它不是日记，别混进来。
-        files = [p for p in sorted(self.diary_dir.glob("*.md"), reverse=True) if p.name != "index.md"]
+    def _folder_diaries(self, folder: str) -> list[dict]:
+        d = self.diary_dir / folder
+        if not d.is_dir():
+            return []
+        files = [p for p in d.glob("*.md") if p.name != "index.md"]
+        files.sort(key=lambda p: p.name, reverse=True)
         return [self._parse(p) for p in files]
 
-    def recent(self, n: int) -> list[dict]:
-        return self.list_diaries()[: max(0, int(n))]
+    def list_diaries(self, folder: str | None = None) -> list[dict]:
+        """不传 folder 就返回所有人的（按文件名倒序）。"""
+        if folder:
+            return self._folder_diaries(folder)
+        items: list[dict] = []
+        for name, _ in self.list_folders():
+            items.extend(self._folder_diaries(name))
+        items.sort(key=lambda x: str(x.get("name") or ""), reverse=True)
+        return items
 
-    def search(self, keyword: str, limit: int = 5) -> list[dict]:
+    def recent(self, n: int, folder: str | None = None) -> list[dict]:
+        return self.list_diaries(folder)[: max(0, int(n))]
+
+    def search(self, keyword: str, limit: int = 5, folder: str | None = None) -> list[dict]:
         keyword = (keyword or "").strip()
         if not keyword:
             return []
         hits = []
-        for item in self.list_diaries():
+        for item in self.list_diaries(folder):
             blob = f"{item.get('title', '')}\n{item.get('body', '')}\n{','.join(item.get('tags') or [])}"
             if keyword in blob:
                 hits.append(item)
@@ -211,16 +312,36 @@ class DiaryStore:
                     break
         return hits
 
-    def rebuild_index(self) -> None:
-        items = self.list_diaries()
-        lines = ["# 日记索引", "", f"共 {len(items)} 篇，新的在上面。", ""]
+    def rebuild_index(self, folder_dir: Path | None = None) -> None:
+        """重建某个文件夹的 index.md。"""
+        if folder_dir is None:
+            for name, _ in self.list_folders():
+                self.rebuild_index(self.diary_dir / name)
+            return
+        folder_dir = Path(folder_dir)
+        if not folder_dir.is_dir():
+            return
+        items = self._folder_diaries(folder_dir.name)
+        lines = [f"# {folder_dir.name} · 日记索引", "", f"共 {len(items)} 篇，新的在上面。", ""]
         for item in items:
             title = item.get("title") or item.get("name")
             date = item.get("date") or ""
             tags = " ".join(f"`{t}`" for t in (item.get("tags") or [])[:4])
             lines.append(f"- [{date}｜{title}]({item['name']}) {tags}".rstrip())
         try:
-            self.index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            (folder_dir / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+    def rebuild_master_index(self) -> None:
+        folders = self.list_folders()
+        lines = ["# 大肥鱼的日记 · 总索引", "", f"共 {len(folders)} 个文件夹。", ""]
+        for name, count in folders:
+            lines.append(f"- [{name}]({name}/index.md) —— {count} 篇")
+        total = sum(c for _, c in folders)
+        lines.insert(3, f"合计 {total} 篇。")
+        try:
+            (self.diary_dir / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         except Exception:
             pass
 
@@ -230,14 +351,19 @@ class DiaryStore:
             return 0
         cutoff = time.time() - days * 86400
         moved = 0
-        for path in list(self.diary_dir.glob("*.md")):
-            try:
-                if path.stat().st_mtime < cutoff:
-                    self.archive_dir.mkdir(exist_ok=True)
-                    path.replace(self.archive_dir / path.name)
-                    moved += 1
-            except Exception:
-                continue
+        for folder, _ in self.list_folders():
+            for path in list((self.diary_dir / folder).glob("*.md")):
+                if path.name == "index.md":
+                    continue
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        dest = self.archive_dir / folder
+                        dest.mkdir(parents=True, exist_ok=True)
+                        path.replace(dest / path.name)
+                        moved += 1
+                except Exception:
+                    continue
         if moved:
             self.rebuild_index()
+            self.rebuild_master_index()
         return moved
