@@ -122,6 +122,8 @@ class DiaryStar(Star):
         self._loop_task: asyncio.Task | None = None
         self._startup_task: asyncio.Task | None = None
         self._intimacy_cache: tuple[float, dict] = (0.0, {})
+        # 刚发生过「日记权限」指令的会话，那一轮不记
+        self._admin_umos: dict[str, float] = {}
         # 启动即补写：等模型和平台加载完，再用最近 N 条写一篇
         try:
             self._startup_task = asyncio.create_task(self._startup_write())
@@ -180,27 +182,28 @@ class DiaryStar(Star):
             word = word.strip()
             if word and first == word:
                 return True
-        # 关于「日记权限」的对话也不进日记：查名单、开关某人
-        if self._is_diary_admin_talk(t):
-            return True
         return False
 
-    @staticmethod
-    def _is_diary_admin_talk(text: str) -> bool:
-        """主人管日记权限的那些话，不该被写进日记本身。"""
-        t = (text or "").strip()
-        if not t or "日记" not in t:
-            return False
-        keys = (
-            "权限", "开关", "名单", "写谁的", "谁的日记", "别写", "不要写", "不用写",
-            "恢复写", "恢复给", "关掉", "关闭", "停止写", "不给", "允许写",
-            "记不记", "要不要记", "日记列表", "几个文件夹",
-        )
-        if any(k in t for k in keys):
-            return True
-        # 「别给某某写日记了」「恢复给某某写日记」这类
-        import re as _re
-        return bool(_re.search(r"(给|让).{1,20}(写|在记).{0,6}日记", t))
+    def _mark_admin_turn(self, event: AstrMessageEvent) -> None:
+        """这轮是主人在管日记权限：把刚记进去的那句撤掉，回复也不记。"""
+        try:
+            umo = getattr(event, "unified_msg_origin", None) or event.get_session_id()
+            uid = str(event.get_sender_id() or "")
+            # 以这条消息自己的时间戳为准，只撤这一轮，别误伤之前的聊天
+            ts = 0.0
+            try:
+                ts = float(getattr(event.message_obj, "timestamp", 0) or 0)
+            except Exception:
+                ts = 0.0
+            now = time.time()
+            if ts <= 0 or ts > now or (now - ts) > 900:
+                ts = now - 120
+            dropped = self.store.drop_recent(uid, ts - 2) if uid else 0
+            self._admin_umos[str(umo)] = now
+            if dropped:
+                logger.info(f"[diary] 权限指令轮次，撤掉 {dropped} 条缓冲")
+        except Exception as exc:
+            logger.debug(f"[diary] 标记权限轮次失败：{exc}")
 
     def _should_record(self, event: AstrMessageEvent) -> bool:
         """记主人的对话；关系够亲密的人也算。"""
@@ -362,6 +365,7 @@ class DiaryStar(Star):
         不需要参数，直接返回名单和每个人是开着还是关着。
         """
         _ = event
+        self._mark_admin_turn(event)
         people = self._known_people()
         if not people:
             return "现在还没有任何人的记录，先聊几句吧。"
@@ -385,6 +389,7 @@ class DiaryStar(Star):
         """
         if not self._is_owner(event):
             return "这个只有主人能改哦。"
+        self._mark_admin_turn(event)
         uid_hits = self._match_people(person)
         if not uid_hits:
             names = "、".join(i.get("name", u) for u, i in self._known_people().items()) or "（还没有别人）"
@@ -569,6 +574,12 @@ class DiaryStar(Star):
         """把她自己的回复也记进缓冲——日记里要有她说过的话。"""
         try:
             if not bool(self._cfg("record_self", True)):
+                return
+            umo_key = str(getattr(event, "unified_msg_origin", None) or event.get_session_id())
+            # 这一轮是「日记权限」指令，她的回复也不记
+            marked = self._admin_umos.pop(umo_key, None)
+            if marked is not None:
+                logger.debug("[diary] 权限指令轮次，回复不记")
                 return
             if not self._should_record(event):
                 return
