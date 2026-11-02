@@ -40,14 +40,14 @@
 面板 → **插件** → **从 GitHub 安装**，填：
 
 ```
-xingluocheng/astrbot_plugin_diary
+{GH_USER}/astrbot_plugin_diary
 ```
 
 ### 方式二：命令行
 
 ```bash
 cd AstrBot/data/plugins
-git clone https://github.com/xingluocheng/astrbot_plugin_diary.git
+git clone https://github.com/{GH_USER}/astrbot_plugin_diary.git
 ```
 
 装完重启 AstrBot。第一次启动时它会自动在桌面建好日记文件夹。
@@ -214,6 +214,10 @@ tags: 加班, 旧自行车, 大白饭
 
 ## 八、版本历史
 
+### 1.5.4 — 2026-11-02
+- 修复名单把没到亲密的人说成在写；名单分「正在写 / 还没解锁 / 已关闭」
+- 主人说「也开始给某某写」可强制开启，不受亲密度限制
+
 ### 1.5.3 — 2026-11-02
 - 权限指令改由她自己判断：不再靠关键词；她调用权限工具时，这一轮直接从缓冲撤掉
 
@@ -284,12 +288,12 @@ tags: 加班, 旧自行车, 大白饭
 
 ## 九、仓库
 
-https://github.com/xingluocheng/astrbot_plugin_diary
+https://github.com/{GH_USER}/astrbot_plugin_diary
 
 ## 十、相关插件
 
-- [大肥鱼的空间](https://github.com/xingluocheng/astrbot_plugin_qzone_mood) —— 情绪驱动自动发 QQ 空间说说
-- [大肥鱼的亲密度](https://github.com/xingluocheng/astrbot_plugin_intimacy) —— 按聊天天数推进关系，主人恒定最高
+- [大肥鱼的空间](https://github.com/{GH_USER}/astrbot_plugin_qzone_mood) —— 情绪驱动自动发 QQ 空间说说
+- [大肥鱼的亲密度](https://github.com/{GH_USER}/astrbot_plugin_intimacy) —— 按聊天天数推进关系，主人恒定最高
 
 ---
 
