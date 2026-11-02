@@ -180,7 +180,27 @@ class DiaryStar(Star):
             word = word.strip()
             if word and first == word:
                 return True
+        # 关于「日记权限」的对话也不进日记：查名单、开关某人
+        if self._is_diary_admin_talk(t):
+            return True
         return False
+
+    @staticmethod
+    def _is_diary_admin_talk(text: str) -> bool:
+        """主人管日记权限的那些话，不该被写进日记本身。"""
+        t = (text or "").strip()
+        if not t or "日记" not in t:
+            return False
+        keys = (
+            "权限", "开关", "名单", "写谁的", "谁的日记", "别写", "不要写", "不用写",
+            "恢复写", "恢复给", "关掉", "关闭", "停止写", "不给", "允许写",
+            "记不记", "要不要记", "日记列表", "几个文件夹",
+        )
+        if any(k in t for k in keys):
+            return True
+        # 「别给某某写日记了」「恢复给某某写日记」这类
+        import re as _re
+        return bool(_re.search(r"(给|让).{1,20}(写|在记).{0,6}日记", t))
 
     def _should_record(self, event: AstrMessageEvent) -> bool:
         """记主人的对话；关系够亲密的人也算。"""
@@ -275,6 +295,118 @@ class DiaryStar(Star):
             await asyncio.sleep(20)
         logger.info("[diary] 启动补写放弃，等后台定时再写")
 
+    # ------------------------------------------------------- 日记权限
+    def _disabled(self) -> dict:
+        return self.store.state.setdefault("disabled", {})
+
+    def _is_disabled(self, uid: str) -> bool:
+        return bool(self._disabled().get(str(uid)))
+
+    def _known_people(self) -> dict[str, dict]:
+        """汇总所有「有日记或有过记录」的人：{uid: {name, folder, count}}"""
+        people: dict[str, dict] = {}
+        folders = self.store.state.get("folders") or {}
+        for uid, folder in folders.items():
+            people[str(uid)] = {
+                "name": str(folder),
+                "folder": str(folder),
+                "count": len(self.store.list_diaries(str(folder))) if folder else 0,
+            }
+        # 亲密度插件里有名字的也算进来
+        try:
+            raw = json.loads(self._intimacy_file().read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for uid, rec in raw.items():
+                    uid = str(uid)
+                    name = str((rec or {}).get("name") or "").strip()
+                    if not name or name == uid:
+                        name = f"QQ尾号{uid[-4:]}"
+                    item = people.setdefault(uid, {"name": name, "folder": "", "count": 0})
+                    if not item.get("name") or item["name"].startswith("QQ尾号"):
+                        item["name"] = name
+        except Exception:
+            pass
+        # 主人自己一定在表里
+        for uid in self._owner_ids():
+            item = people.setdefault(uid, {"name": "主人", "folder": self.store.owner_folder, "count": 0})
+            item["name"] = "主人"
+            item["folder"] = self.store.owner_folder
+            item["count"] = len(self.store.list_diaries(self.store.owner_folder))
+        return people
+
+    def _match_people(self, keyword: str) -> list[str]:
+        """按名字 / 文件夹 / 号码 / 尾号 找人。"""
+        keyword = (keyword or "").strip()
+        if not keyword:
+            return []
+        people = self._known_people()
+        lowered = keyword.lower()
+        hits = []
+        for uid, info in people.items():
+            fields = {str(info.get("name") or ""), str(info.get("folder") or ""), uid}
+            if uid:
+                fields.add(f"QQ尾号{uid[-4:]}")
+            if any(lowered == f.lower() or (len(lowered) >= 2 and lowered in f.lower()) for f in fields if f):
+                hits.append(uid)
+        return hits
+
+    def _status_line(self, uid: str, info: dict) -> str:
+        state = "已关闭" if self._is_disabled(uid) else "在写"
+        folder = info.get("folder") or "（还没建文件夹）"
+        return f"{info.get('name', uid)}｜{state}｜{folder}｜{info.get('count', 0)} 篇"
+
+    @filter.llm_tool(name="diary_list_people")
+    async def tool_list_people(self, event: AstrMessageEvent) -> str:
+        """查看现在给哪些人写日记、哪些人关了。主人问「现在在写谁的日记」时用。
+
+        不需要参数，直接返回名单和每个人是开着还是关着。
+        """
+        _ = event
+        people = self._known_people()
+        if not people:
+            return "现在还没有任何人的记录，先聊几句吧。"
+        lines = [f"共 {len(people)} 人："]
+        for uid, info in people.items():
+            lines.append("- " + self._status_line(uid, info))
+        offs = [i.get("name") for u, i in people.items() if self._is_disabled(u)]
+        lines.append("")
+        lines.append("已关闭：" + ("、".join(offs) if offs else "无"))
+        return "\n".join(lines)
+
+    @filter.llm_tool(name="diary_set_person")
+    async def tool_set_person(self, event: AstrMessageEvent, person: str, enable: bool = True) -> str:
+        """打开或关闭某个人的日记权限。主人说「不要给某某写日记了」「恢复给某某写」时用。
+
+        关闭后：和她/他聊天时不写日记、也不读那人的日记，但已经写好的日记文件不会删除。
+
+        Args:
+            person(string): 必填。那个人的名字或QQ号，比如「小晴」「QQ尾号0199」。
+            enable(boolean): 可选。true=恢复写（默认），false=关闭。
+        """
+        if not self._is_owner(event):
+            return "这个只有主人能改哦。"
+        uid_hits = self._match_people(person)
+        if not uid_hits:
+            names = "、".join(i.get("name", u) for u, i in self._known_people().items()) or "（还没有别人）"
+            return f"没找到「{person}」。现在认识的人有：{names}"
+        if len(uid_hits) > 1:
+            people = self._known_people()
+            return "找到好几个人，请说得更具体些：" + "、".join(
+                people[u].get("name", u) for u in uid_hits
+            )
+
+        uid = uid_hits[0]
+        info = self._known_people()[uid]
+        name = info.get("name") or uid
+        if enable:
+            self._disabled().pop(str(uid), None)
+        else:
+            self._disabled()[str(uid)] = name
+        self.store.save()
+        action = "恢复写" if enable else "不再写"
+        extra = "" if enable else "（已经写好的日记还在，没删）"
+        return f"好啦，{name} 的日记{action}了{extra}。"
+
     # ------------------------------------------------------------- 写日记
     def _intimacy_record(self, uid: str) -> dict:
         """取亲密度插件里这个人的记录。"""
@@ -306,7 +438,9 @@ class DiaryStar(Star):
         return f"QQ尾号{str(uid)[-4:]}" if uid else "未命名"
 
     def _can_write_for(self, uid: str) -> bool:
-        """主人永远可以；其他人要亲密度够。"""
+        """主人永远可以；其他人要亲密度够，且没被主人关掉。"""
+        if self._is_disabled(uid):
+            return False
         if uid in self._owner_ids():
             return True
         if not bool(self._cfg("include_intimate", True)):
@@ -473,6 +607,9 @@ class DiaryStar(Star):
                 return
             uid = str(event.get_sender_id() or "")
             is_owner = self._is_owner(event)
+            # 主人关掉的人：不读
+            if self._is_disabled(uid):
+                return
 
             # 只读「和当前这个人」的日记：主人读主人文件夹，其他人读自己的文件夹
             folder = self.store.folder_of(uid)
