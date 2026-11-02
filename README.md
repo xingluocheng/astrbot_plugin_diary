@@ -40,14 +40,14 @@
 面板 → **插件** → **从 GitHub 安装**，填：
 
 ```
-{GH_USER}/astrbot_plugin_diary
+xingluocheng/astrbot_plugin_diary
 ```
 
 ### 方式二：命令行
 
 ```bash
 cd AstrBot/data/plugins
-git clone https://github.com/{GH_USER}/astrbot_plugin_diary.git
+git clone https://github.com/xingluocheng/astrbot_plugin_diary.git
 ```
 
 装完重启 AstrBot。第一次启动时它会自动在桌面建好日记文件夹。
@@ -288,12 +288,12 @@ tags: 加班, 旧自行车, 大白饭
 
 ## 九、仓库
 
-https://github.com/{GH_USER}/astrbot_plugin_diary
+https://github.com/xingluocheng/astrbot_plugin_diary
 
 ## 十、相关插件
 
-- [大肥鱼的空间](https://github.com/{GH_USER}/astrbot_plugin_qzone_mood) —— 情绪驱动自动发 QQ 空间说说
-- [大肥鱼的亲密度](https://github.com/{GH_USER}/astrbot_plugin_intimacy) —— 按聊天天数推进关系，主人恒定最高
+- [大肥鱼的空间](https://github.com/xingluocheng/astrbot_plugin_qzone_mood) —— 情绪驱动自动发 QQ 空间说说
+- [大肥鱼的亲密度](https://github.com/xingluocheng/astrbot_plugin_intimacy) —— 按聊天天数推进关系，主人恒定最高
 
 ---
 
