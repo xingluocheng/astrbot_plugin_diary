@@ -5,6 +5,18 @@
     "default": true,
     "hint": "关掉后不再自动写日记，也不会注入上下文；指令仍然可用。"
   },
+  "owner_ids": {
+    "description": "① 主人的 QQ（改成你自己的号）",
+    "type": "string",
+    "default": "",
+    "hint": "填你自己的 QQ 号，多个用英文逗号。这一步必须做：留空会退回 AstrBot 管理员判定，而管理员默认是 astrbot 这个用户名，永远匹配不上 QQ 号。"
+  },
+  "bot_ids": {
+    "description": "② 大肥鱼的 QQ（机器人自己的号）",
+    "type": "string",
+    "default": "",
+    "hint": "机器人登录用的那个号。留空 = 自动用协议端当前登录的账号（推荐）；填了会按这个号做校验/过滤。"
+  },
   "interval_hours": {
     "description": "每隔多少小时检查一次",
     "type": "int",
@@ -40,18 +52,6 @@
     "type": "int",
     "default": 1500,
     "hint": "超过就截断。控制成本用，1200~2000 之间比较合适。"
-  },
-  "bot_ids": {
-    "description": "大肥鱼（机器人）的 QQ",
-    "type": "string",
-    "default": "",
-    "hint": "留空 = 自动用当前登录账号。这条只作用在「收到消息」的通道上：她说过的话照记不误（由发送前拦截写入，标记为「大肥鱼：」），这里只是防止同一句被两条通道各记一次。"
-  },
-  "owner_ids": {
-    "description": "主人 QQ 号",
-    "type": "string",
-    "default": "",
-    "hint": "只记录这个号说的话。多个用英文逗号分隔；留空则只认 AstrBot 管理员。"
   },
   "private_only": {
     "description": "只记私聊",
