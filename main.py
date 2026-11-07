@@ -91,8 +91,9 @@ COMMAND_WORDS = {
     "reset", "help", "anysearch", "亲密度", "好感度", "帮助",
     "空间", "空间帮助", "空间状态", "空间测试", "空间发",
     "日记", "日记帮助", "日记列表", "日记状态", "日记写",
+    "自拍", "自拍状态", "自拍帮助", "拍一张",
 }
-COMMAND_PREFIXES = ("空间", "日记", "亲密度", "好感度")
+COMMAND_PREFIXES = ("空间", "日记", "亲密度", "好感度", "自拍")
 
 # 「问她现在心情怎么样」这类问话不算聊天，不进日记（她查心情是工具调用）
 MOOD_ASK_PATTERNS = (
@@ -675,6 +676,21 @@ class DiaryStar(Star):
             self.store.append_chat(umo, owner_uid, "大肥鱼", text)
         except Exception as exc:
             logger.debug(f"[diary] 记录自己的回复失败：{exc}")
+
+    def record_selfie(self, umo: str, uid: str, doing: str, prompt: str = "") -> None:
+        """自拍插件发完图后调这个，把「她拍了什么」记进日记素材。
+
+        只记画面内容，不记指令、不记提示词细节。
+        """
+        try:
+            doing = (doing or "").strip()
+            if not doing:
+                return
+            line = f"（拍了张照片：{doing}）"
+            self.store.append_chat(umo, uid, "大肥鱼", line)
+            logger.debug(f"[diary] 记下自拍：{doing[:40]}")
+        except Exception as exc:
+            logger.debug(f"[diary] 记自拍失败：{exc}")
 
     @filter.on_llm_request(priority=9000)
     async def inject_diary(self, event: AstrMessageEvent, req):
