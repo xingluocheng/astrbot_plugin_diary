@@ -94,6 +94,14 @@ COMMAND_WORDS = {
 }
 COMMAND_PREFIXES = ("空间", "日记", "亲密度", "好感度")
 
+# 「问她现在心情怎么样」这类问话不算聊天，不进日记（她查心情是工具调用）
+MOOD_ASK_PATTERNS = (
+    "心情怎么样", "心情咋样", "心情如何", "心情好不好", "心情怎样",
+    "什么心情", "啥心情", "心情呢", "说说心情", "心情告诉我",
+    "你开心吗", "你难过吗", "你难受吗", "你还好吗",
+    "你现在开心", "你现在难过", "你现在难受", "现在心情",
+)
+
 # 这些是报错提示，不是她说过的话，不能进日记素材
 ERROR_MARKERS = (
     "LLM 响应错误",
@@ -182,6 +190,9 @@ class DiaryStar(Star):
             word = word.strip()
             if word and first == word:
                 return True
+        # 问她心情的那些话，也不进日记
+        if any(p in t for p in MOOD_ASK_PATTERNS):
+            return True
         return False
 
     def _mark_admin_turn(self, event: AstrMessageEvent) -> None:
