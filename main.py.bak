@@ -1,0 +1,328 @@
+"""大肥鱼的日记 —— 定时把发生的事写成日记，并在聊天时想起来。"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from datetime import datetime
+from pathlib import Path
+
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event.filter import EventMessageType
+from astrbot.api.star import Context, Star, StarTools
+
+from . import writer
+from .storage import DiaryStore
+
+PLUGIN_NAME = "astrbot_plugin_diary"
+
+DEFAULTS = {
+    "enabled": True,
+    "interval_hours": 24,
+    "min_messages": 10,
+    "max_messages_per_diary": 120,
+    "inject_enabled": True,
+    "inject_recent": 2,
+    "inject_max_chars": 1500,
+    "owner_ids": "",
+    "retention_days": 0,
+    "persona_extra": "",
+    "diary_voice": "第一人称，像睡前随手写在备忘录里",
+}
+
+CHECK_INTERVAL = 300  # 后台每 5 分钟看一次是否该写
+
+
+class DiaryStar(Star):
+    def __init__(self, context: Context, config: dict = None):
+        super().__init__(context)
+        self.config = config if config is not None else {}
+        data_dir = Path(StarTools.get_data_dir(PLUGIN_NAME))
+        self.store = DiaryStore(data_dir)
+        self._lock = asyncio.Lock()
+        self._loop_task: asyncio.Task | None = None
+
+    # ------------------------------------------------------------- 基础
+    def _cfg(self, key: str, default=None):
+        fallback = DEFAULTS.get(key, default)
+        try:
+            value = self.config.get(key, fallback)
+        except Exception:
+            return fallback
+        if value is None:
+            return fallback
+        if isinstance(value, str) and value == "" and isinstance(fallback, str) and fallback:
+            return fallback
+        return value
+
+    def _provider(self):
+        try:
+            return self.context.get_using_provider()
+        except Exception as exc:
+            logger.warning(f"[diary] 取模型失败：{exc}")
+            return None
+
+    def _owner_ids(self) -> set[str]:
+        raw = str(self._cfg("owner_ids", "") or "")
+        return {w.strip() for w in raw.replace("，", ",").split(",") if w.strip()}
+
+    def _is_owner(self, event: AstrMessageEvent) -> bool:
+        ids = self._owner_ids()
+        sender = str(event.get_sender_id() or "")
+        if ids:
+            return sender in ids
+        try:
+            return bool(event.is_admin())
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------- 后台循环
+    def _ensure_loop(self) -> None:
+        if self._loop_task is not None and not self._loop_task.done():
+            return
+        try:
+            self._loop_task = asyncio.create_task(self._loop())
+        except Exception as exc:
+            logger.debug(f"[diary] 启动后台任务失败：{exc}")
+
+    async def _loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(CHECK_INTERVAL)
+                await self.maybe_write()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.debug(f"[diary] 后台检查异常：{exc}")
+
+    async def terminate(self):
+        if self._loop_task is not None:
+            self._loop_task.cancel()
+            try:
+                await self._loop_task
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------- 写日记
+    async def maybe_write(self, force: bool = False) -> dict:
+        if not bool(self._cfg("enabled", True)):
+            return {"ok": False, "detail": "总开关关着"}
+        if self._lock.locked():
+            return {"ok": False, "detail": "正在写上一篇"}
+
+        interval = int(self._cfg("interval_hours", 24) or 24) * 3600
+        last = float(self.store.get("last_write_ts") or 0)
+        if not force and last and (time.time() - last) < interval:
+            return {"ok": False, "detail": "还没到时间"}
+
+        total = self.store.chat_line_count()
+        limit = int(self._cfg("max_messages_per_diary", 120) or 120)
+        pending = self.store.pending_chats(limit)
+        if not pending:
+            return {"ok": False, "detail": "没有新的对话"}
+        if not force and len(pending) < int(self._cfg("min_messages", 10) or 10):
+            return {"ok": False, "detail": f"只攒了 {len(pending)} 条，不够"}
+
+        provider = self._provider()
+        if provider is None:
+            return {"ok": False, "detail": "没有可用模型"}
+
+        async with self._lock:
+            start = pending[0].get("ts") or time.time()
+            end = pending[-1].get("ts") or time.time()
+            fmt = "%m-%d %H:%M"
+            time_range = (
+                f"{datetime.fromtimestamp(start).strftime(fmt)} ~ "
+                f"{datetime.fromtimestamp(end).strftime(fmt)}"
+            )
+            transcript = "\n".join(
+                f"{row.get('who', '某人')}：{row.get('text', '')}" for row in pending
+            )
+            try:
+                data = await writer.write_diary(
+                    provider,
+                    transcript=transcript,
+                    time_range=time_range,
+                    message_count=len(pending),
+                    voice=str(self._cfg("diary_voice", "") or ""),
+                    extra=str(self._cfg("persona_extra", "") or ""),
+                )
+            except Exception as exc:
+                logger.warning(f"[diary] 写作失败：{exc}")
+                return {"ok": False, "detail": f"写作失败：{exc}"}
+
+            if not (data.get("body") or "").strip():
+                return {"ok": False, "detail": "模型没写出正文"}
+
+            meta = {
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "range": time_range,
+                "messages": len(pending),
+                "mood": data.get("mood", ""),
+                "title": data.get("title", ""),
+                "tags": data.get("tags", []),
+            }
+            path = self.store.save_diary(meta, data["body"])
+            self.store.mark_consumed(total)
+            moved = self.store.apply_retention(int(self._cfg("retention_days", 0) or 0))
+            if moved:
+                logger.info(f"[diary] 归档了 {moved} 篇旧日记")
+            logger.info(f"[diary] 写完一篇：{path.name}")
+            return {
+                "ok": True,
+                "path": str(path),
+                "detail": f"写完啦（{len(pending)} 条对话 → {len(data['body'])} 字）",
+            }
+
+    # ------------------------------------------------------------- 事件
+    @filter.event_message_type(EventMessageType.ALL)
+    async def on_message(self, event: AstrMessageEvent):
+        try:
+            text = (getattr(event, "message_str", "") or "").strip()
+            if text and not text.startswith("/日记"):
+                umo = getattr(event, "unified_msg_origin", None) or event.get_session_id()
+                who = event.get_sender_name() or str(event.get_sender_id() or "某人")
+                self.store.append_chat(umo, who, text)
+            self._ensure_loop()
+        except Exception as exc:
+            logger.debug(f"[diary] 记录消息失败：{exc}")
+        if False:
+            yield
+
+    @filter.on_llm_request(priority=9000)
+    async def inject_diary(self, event: AstrMessageEvent, req):
+        try:
+            if not bool(self._cfg("inject_enabled", True)):
+                return
+            count = int(self._cfg("inject_recent", 2) or 2)
+            items = self.store.recent(count)
+            if not items:
+                return
+            limit = int(self._cfg("inject_max_chars", 1500) or 1500)
+            chunks = [
+                "【本鲸的日记】",
+                "下面是本鲸自己写的日记，用来想起之前发生过什么。",
+                "- 聊到以前的事，优先从这里找；找不到就直说记不清了。",
+                "- 用你自己的话说，别逐字念，也别说“根据我的日记”。",
+                "",
+            ]
+            used = 0
+            for item in items:
+                head = f"=== {item.get('date', '')}｜{item.get('title', '')} ==="
+                body = (item.get("body") or "").strip()
+                piece = f"{head}\n{body}"
+                if used + len(piece) > limit:
+                    piece = piece[: max(0, limit - used)]
+                if not piece:
+                    break
+                chunks.append(piece)
+                used += len(piece)
+                if used >= limit:
+                    break
+            block = "\n\n".join(chunks)
+            req.system_prompt = (req.system_prompt or "") + "\n\n" + block
+        except Exception as exc:
+            logger.debug(f"[diary] 注入失败：{exc}")
+
+    # ------------------------------------------------------------- 指令
+    @filter.command("日记")
+    async def cmd_diary(self, event: AstrMessageEvent):
+        raw = (getattr(event, "message_str", "") or "").strip()
+        sub = raw
+        for prefix in ("/日记", "日记"):
+            if sub.startswith(prefix):
+                sub = sub[len(prefix):].strip()
+                break
+
+        if sub in ("帮助", "help", "?"):
+            yield event.plain_result(
+                "/日记　　　　看最近一篇\n"
+                "/日记 列表　 最近写过的标题\n"
+                "/日记 写　　 立刻写一篇（主人）\n"
+                "/日记 回顾 <词>　在日记里找某件事（主人）\n"
+                "/日记 状态　 下次什么时候写"
+            )
+            return
+
+        if sub in ("写", "write"):
+            if not self._is_owner(event):
+                yield event.plain_result("日记只有主人能让本鲸写哦")
+                return
+            yield event.plain_result("本鲸去写日记…")
+            result = await self.maybe_write(force=True)
+            yield event.plain_result(result.get("detail", ""))
+            return
+
+        if sub in ("列表", "ls", "list"):
+            if not self._is_owner(event):
+                yield event.plain_result("日记只有主人能翻哦")
+                return
+            items = self.store.recent(10)
+            if not items:
+                yield event.plain_result("还没写过日记")
+                return
+            lines = [f"最近 {len(items)} 篇："]
+            for item in items:
+                tags = " ".join(item.get("tags") or [])
+                lines.append(f"· {item.get('date', '')}｜{item.get('title', '')} {tags}")
+            yield event.plain_result("\n".join(lines))
+            return
+
+        if sub in ("状态", "status"):
+            last = float(self.store.get("last_write_ts") or 0)
+            interval = int(self._cfg("interval_hours", 24) or 24)
+            pending = len(self.store.pending_chats(int(self._cfg("max_messages_per_diary", 120) or 120)))
+            items = self.store.list_diaries()
+            if last:
+                due = last + interval * 3600
+                left = max(0, int((due - time.time()) / 60))
+                next_text = f"{left} 分钟后" if left else "已到时间，等攒够消息"
+            else:
+                next_text = "还没写过"
+            yield event.plain_result(
+                f"开关：{'开' if self._cfg('enabled', True) else '关'}\n"
+                f"共 {len(items)} 篇｜待写对话 {pending} 条\n"
+                f"间隔：{interval} 小时｜下次：{next_text}\n"
+                f"注入：{'开' if self._cfg('inject_enabled', True) else '关'}"
+                f"（最近 {int(self._cfg('inject_recent', 2) or 2)} 篇）"
+            )
+            return
+
+        if sub.startswith("回顾") or sub.startswith("搜"):
+            if not self._is_owner(event):
+                yield event.plain_result("日记只有主人能翻哦")
+                return
+            keyword = sub[2:].strip() if sub.startswith("回顾") else sub[1:].strip()
+            if not keyword:
+                yield event.plain_result("要给个词嘛，比如 /日记 回顾 白饭")
+                return
+            hits = self.store.search(keyword, limit=5)
+            if not hits:
+                yield event.plain_result(f"日记里没有「{keyword}」")
+                return
+            lines = [f"找到 {len(hits)} 篇提到「{keyword}」："]
+            for item in hits:
+                body = (item.get("body") or "").replace("\n", " ")
+                idx = body.find(keyword)
+                snippet = body[max(0, idx - 30): idx + 50] if idx >= 0 else body[:80]
+                lines.append(f"· {item.get('date', '')}｜{item.get('title', '')}\n  ……{snippet}……")
+            yield event.plain_result("\n".join(lines))
+            return
+
+        # 默认：最近一篇
+        items = self.store.recent(1)
+        if not items:
+            yield event.plain_result("还没写过日记。攒够消息之后本鲸会自己写的，也可以发 /日记 写")
+            return
+        item = items[0]
+        body = (item.get("body") or "").strip()
+        if len(body) > 1200:
+            body = body[:1200] + "\n…（后面还长，去 diary 目录看全文）"
+        tags = " ".join(item.get("tags") or [])
+        header = f"【{item.get('date', '')}】{item.get('title', '')}"
+        if item.get("mood"):
+            header += f"\n情绪：{item['mood']}"
+        if tags:
+            header += f"\n标签：{tags}"
+        yield event.plain_result(f"{header}\n\n{body}")
