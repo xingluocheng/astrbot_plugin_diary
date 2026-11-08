@@ -111,6 +111,17 @@ ERROR_MARKERS = (
     "Insufficient Balance",
     "请求失败",
     "模型调用失败",
+    # 自拍/生图相关的失败提示，都不是她说过的话
+    "拍失败了",
+    "出图失败",
+    "出图异常",
+    "调用函数出现异常",
+    "处理函数",
+    "连不上生图接口",
+    "接口返回",
+    "NameError",
+    "Traceback",
+    "SelfieError",
 )
 
 CHECK_INTERVAL = 300  # 后台每 5 分钟看一次是否该写
